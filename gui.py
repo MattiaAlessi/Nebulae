@@ -358,16 +358,16 @@ class AddContactDialog(tk.Toplevel):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  LoginFrame – login embedded in root window (no Toplevel needed)
+#  LoginFrame
 # ─────────────────────────────────────────────────────────────────────────────
 class LoginFrame(tk.Frame):
     def __init__(self, parent, on_login: Callable, on_setup: Callable, has_identity: bool):
         super().__init__(parent, bg=C["bg_deep"])
-        self.on_login  = on_login
-        self.on_setup  = on_setup
+        self.on_login = on_login
+        self.on_setup = on_setup
         self._build(has_identity)
 
-    def _build(self, has_identity: bool):
+    def _build(self, has_identity):
         header = tk.Frame(self, bg=C["bg_deep"], pady=30)
         header.pack(fill="x")
         tk.Label(header, text="◈ NEBULAE", fg=C["accent_cyan"],
@@ -391,27 +391,23 @@ class LoginFrame(tk.Frame):
                             bg=C["bg_input"], fg=C["text_primary"],
                             insertbackground=C["accent_cyan"],
                             relief="solid", bd=1, font=FONT_MONO,
-                            highlightthickness=1,
-                            highlightcolor=C["accent_cyan"],
+                            highlightthickness=1, highlightcolor=C["accent_cyan"],
                             highlightbackground=C["border"])
         pw_entry.pack(fill="x", ipady=8)
         pw_entry.bind("<Return>", lambda _: self._do_login())
         pw_entry.focus_set()
         self.amnesic_var = tk.BooleanVar(value=False)
         tk.Checkbutton(parent, text="Amnesic mode (RAM only)",
-                       variable=self.amnesic_var,
-                       bg=C["bg_deep"], fg=C["text_secondary"],
-                       selectcolor=C["bg_card"],
+                       variable=self.amnesic_var, bg=C["bg_deep"],
+                       fg=C["text_secondary"], selectcolor=C["bg_card"],
                        activebackground=C["bg_deep"],
                        font=(FONT_BODY[0], 9)).pack(anchor="w", pady=(12, 0))
         tk.Frame(parent, bg=C["bg_deep"], height=20).pack()
-        tk.Button(parent, text="UNLOCK  ▶",
-                  command=self._do_login,
+        tk.Button(parent, text="UNLOCK  ▶", command=self._do_login,
                   bg=C["accent_cyan"], fg=C["bg_deep"],
-                  font=(FONT_BODY[0], 11, "bold"),
-                  relief="flat", cursor="hand2", pady=10).pack(fill="x")
-        self.msg_lbl = tk.Label(parent, text="", bg=C["bg_deep"],
-                                font=(FONT_BODY[0], 9))
+                  font=(FONT_BODY[0], 11, "bold"), relief="flat",
+                  cursor="hand2", pady=10).pack(fill="x")
+        self.msg_lbl = tk.Label(parent, text="", bg=C["bg_deep"], font=(FONT_BODY[0], 9))
         self.msg_lbl.pack(pady=8)
 
     def _build_setup(self, parent):
@@ -429,28 +425,26 @@ class LoginFrame(tk.Frame):
                      insertbackground=C["accent_cyan"],
                      relief="solid", bd=1, font=FONT_MONO).pack(fill="x", ipady=6)
         tk.Frame(parent, bg=C["bg_deep"], height=16).pack()
-        tk.Button(parent, text="FORGE IDENTITY  ▶",
-                  command=self._do_setup,
+        tk.Button(parent, text="FORGE IDENTITY  ▶", command=self._do_setup,
                   bg=C["accent_purple"], fg="#fff",
-                  font=(FONT_BODY[0], 11, "bold"),
-                  relief="flat", cursor="hand2", pady=10).pack(fill="x")
-        self.msg_lbl = tk.Label(parent, text="", bg=C["bg_deep"],
-                                font=(FONT_BODY[0], 9))
+                  font=(FONT_BODY[0], 11, "bold"), relief="flat",
+                  cursor="hand2", pady=10).pack(fill="x")
+        self.msg_lbl = tk.Label(parent, text="", bg=C["bg_deep"], font=(FONT_BODY[0], 9))
         self.msg_lbl.pack(pady=8)
 
     def _do_login(self):
-        self.on_login(self.pw_var.get(), getattr(self, 'amnesic_var', tk.BooleanVar()).get())
+        self.on_login(self.pw_var.get(), self.amnesic_var.get())
 
     def _do_setup(self):
-        if self.real_var.get() != "" and self.decoy_var.get() == self.confirm_var.get():
+        if self.real_var.get() and self.decoy_var.get() == self.confirm_var.get():
             self.on_setup(self.real_var.get(), self.decoy_var.get())
         else:
             self.show_error("Passwords do not match or are empty")
 
-    def show_error(self, msg: str):
+    def show_error(self, msg):
         self.msg_lbl.configure(text=f"✗ {msg}", fg=C["accent_red"])
 
-    def show_success(self, msg: str):
+    def show_success(self, msg):
         self.msg_lbl.configure(text=f"✓ {msg}", fg=C["accent_green"])
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -558,10 +552,20 @@ class NEBULAEWindow(tk.Tk):
 
         # My onion
         tk.Frame(self.sidebar, bg=C["border"], height=1).pack(fill="x")
-        self.my_onion_lbl = tk.Label(self.sidebar, text="◎ Not connected",
+        onion_row = tk.Frame(self.sidebar, bg=C["bg_panel"])
+        onion_row.pack(fill="x", padx=10, pady=6)
+        self.my_onion_lbl = tk.Label(onion_row, text="◎ Not connected",
                                      fg=C["text_dim"], bg=C["bg_panel"],
-                                     font=(FONT_SMALL[0], 7), wraplength=240)
-        self.my_onion_lbl.pack(padx=10, pady=6, anchor="w")
+                                     font=(FONT_SMALL[0], 7), wraplength=190,
+                                     anchor="w", justify="left")
+        self.my_onion_lbl.pack(side="left", fill="x", expand=True)
+        self._copy_btn = tk.Button(onion_row, text="⎘",
+                                   command=self._copy_onion,
+                                   bg=C["bg_card"], fg=C["accent_cyan"],
+                                   font=(FONT_SMALL[0], 9), relief="flat",
+                                   cursor="hand2", width=2,
+                                   activebackground=C["border"])
+        self._copy_btn.pack(side="right")
 
     def _on_contact_resize(self, _=None):
         self.contact_canvas.configure(scrollregion=self.contact_canvas.bbox("all"))
@@ -656,21 +660,16 @@ class NEBULAEWindow(tk.Tk):
         from pathlib import Path
         data_dir = Path.home() / ".nebulae" / "data"
         has_identity = (data_dir / "identity.a.enc").exists()
-        # Hide main UI, show login as a frame inside root (avoids Toplevel visibility issues on Windows)
         self.main.pack_forget()
         self.topbar.pack_forget()
-        for w in self.winfo_children():
-            if isinstance(w, tk.Frame) and w not in (self.main, self.topbar):
-                w.pack_forget()
         self._login_frame = LoginFrame(self, self._do_login, self._do_setup, has_identity)
         self._login_frame.pack(expand=True)
         self.geometry("420x540")
         self.resizable(False, False)
         self.update_idletasks()
-        w2, h2 = 420, 540
         sw = self.winfo_screenwidth()
         sh = self.winfo_screenheight()
-        self.geometry(f"{w2}x{h2}+{(sw-w2)//2}+{(sh-h2)//2}")
+        self.geometry(f"420x540+{(sw-420)//2}+{(sh-540)//2}")
         self.deiconify()
         self.lift()
         self.focus_force()
@@ -710,11 +709,21 @@ class NEBULAEWindow(tk.Tk):
 
     def _post_login(self):
         onion = self.app.node.onion_address if self.app.node else "unknown"
+        self._my_onion_addr = onion
         self.my_onion_lbl.configure(text=f"◎ {onion}", fg=C["text_secondary"])
         self.status_lbl.configure(text=f"⬡ ONLINE", fg=C["accent_green"])
         self._refresh_contacts()
-        # Periodic refresh
         self.after(5000, self._periodic_refresh)
+
+    def _copy_onion(self):
+        addr = getattr(self, "_my_onion_addr", None)
+        if not addr or addr == "unknown":
+            return
+        self.clipboard_clear()
+        self.clipboard_append(addr)
+        # Feedback visivo temporaneo
+        self._copy_btn.configure(text="✓", fg=C["accent_green"])
+        self.after(1500, lambda: self._copy_btn.configure(text="⎘", fg=C["accent_cyan"]))
 
     # ── Contact management ───────────────────────────────────────────────────
 
@@ -927,7 +936,6 @@ class NEBULAEWindow(tk.Tk):
 #  Entry point
 # ─────────────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    import traceback
     try:
         app = NEBULAEWindow()
         app.mainloop()
