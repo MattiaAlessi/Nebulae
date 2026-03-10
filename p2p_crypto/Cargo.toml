@@ -1,0 +1,39 @@
+[package]
+name = "p2p_crypto"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "p2p_crypto"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.21", features = ["extension-module"] }
+ring = "0.17"
+chacha20poly1305 = { version = "0.10", features = ["std"] }
+x25519-dalek = { version = "2.0", features = ["static_secrets"] }
+ed25519-dalek = { version = "2.0", features = ["rand_core"] }
+zeroize = { version = "1.7", features = ["derive"] }
+rand = "0.8"
+rand_core = { version = "0.6", features = ["getrandom"] }
+sha2 = "0.10"
+sha3 = "0.10"
+hmac = "0.12"
+pbkdf2 = { version = "0.12", features = ["simple"] }
+aes-gcm = "0.10"
+hkdf = "0.12"
+blake3 = "1.5"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+hex = "0.4"
+base64 = "0.22"
+pqcrypto-kyber = "0.8"
+pqcrypto-traits = "0.3"
+getrandom = { version = "0.2", features = ["js"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
