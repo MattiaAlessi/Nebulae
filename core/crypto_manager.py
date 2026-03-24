@@ -20,6 +20,11 @@ try:
 except ImportError:
     _rust = None  # running without compiled Rust module (dev fallback)
 
+
+def _require_rust() -> None:
+    if _rust is None:
+        raise RuntimeError("p2p_crypto module is not available. Build/install Rust extension first.")
+
 # ─────────────────────────────────────────────────────────────────────────────
 #  Secure Python string wiper
 # ─────────────────────────────────────────────────────────────────────────────
@@ -37,6 +42,7 @@ class CryptoSession:
     """Holds a live ratchet state for one peer. Zeroized on close()."""
 
     def __init__(self, peer_id: str, ratchet_state_json: str):
+        _require_rust()
         self.peer_id = peer_id
         self._state = bytearray(ratchet_state_json.encode())
         self._lock  = threading.Lock()
@@ -46,7 +52,7 @@ class CryptoSession:
         with self._lock:
             result = _rust.ratchet_encrypt(self._state.decode(), plaintext)
             # Update state in-place
-            ctypes.memset(ctypes.c_char_p(bytes(self._state)), 0, len(self._state))
+            _wipe_bytes(self._state)
             new_state = result["state"].encode()
             self._state = bytearray(new_state)
             return result["ciphertext"], result["header_dh_pub"]
@@ -54,7 +60,7 @@ class CryptoSession:
     def decrypt(self, ciphertext: bytes) -> bytes:
         with self._lock:
             result = _rust.ratchet_decrypt(self._state.decode(), ciphertext)
-            ctypes.memset(ctypes.c_char_p(bytes(self._state)), 0, len(self._state))
+            _wipe_bytes(self._state)
             self._state = bytearray(result["state"].encode())
             return result["plaintext"]
 
@@ -76,6 +82,7 @@ class IdentityManager:
     PBKDF2_ITERATIONS = 600_000
 
     def __init__(self, identity_path: Path):
+        _require_rust()
         self.path = identity_path
         self._master_key: Optional[bytearray] = None
 
@@ -172,6 +179,7 @@ class MessageCrypto:
     """
 
     def __init__(self, my_identity: dict):
+        _require_rust()
         self.identity = my_identity
         self._sessions: dict[str, CryptoSession] = {}
 
@@ -183,13 +191,15 @@ class MessageCrypto:
 
         state_json = _rust.ratchet_init_sender(shared, peer_x25519_pub)
         self._sessions[peer_id] = CryptoSession(peer_id, state_json)
+        ratchet_pub = bytes(json.loads(state_json)["dh_send_pub"])
 
-        # Pack handshake: eph_pub(32) + kyber_ct(variable)
+        # Pack handshake: eph_pub + kyber_ct + ratchet_dh_pub
         eph_pub  = result["x25519_eph_pub"]
         kyber_ct = result["kyber_ciphertext"]
         handshake = (
             len(eph_pub).to_bytes(2, "big") + eph_pub +
-            len(kyber_ct).to_bytes(4, "big") + kyber_ct
+            len(kyber_ct).to_bytes(4, "big") + kyber_ct +
+            len(ratchet_pub).to_bytes(2, "big") + ratchet_pub
         )
         return handshake
 
@@ -197,13 +207,26 @@ class MessageCrypto:
                            my_x25519_priv: bytes, my_kyber_priv: bytes) -> None:
         """Receiver side: decapsulate and initialise ratchet."""
         idx = 0
+        if len(handshake) < 2 + 4 + 2:
+            raise ValueError("Malformed handshake blob")
         eph_len  = int.from_bytes(handshake[idx:idx+2], "big"); idx += 2
+        if eph_len <= 0 or idx + eph_len > len(handshake):
+            raise ValueError("Malformed handshake eph key length")
         eph_pub  = handshake[idx:idx+eph_len]; idx += eph_len
         ct_len   = int.from_bytes(handshake[idx:idx+4], "big"); idx += 4
+        if ct_len <= 0 or idx + ct_len > len(handshake):
+            raise ValueError("Malformed handshake kyber ciphertext length")
         kyber_ct = handshake[idx:idx+ct_len]
+        idx += ct_len
+        if idx + 2 > len(handshake):
+            raise ValueError("Malformed handshake ratchet length field")
+        ratchet_len = int.from_bytes(handshake[idx:idx+2], "big"); idx += 2
+        if ratchet_len != 32 or idx + ratchet_len != len(handshake):
+            raise ValueError("Malformed handshake ratchet key")
+        ratchet_pub = handshake[idx:idx+ratchet_len]
 
         shared = _rust.hybrid_decapsulate(my_x25519_priv, eph_pub, my_kyber_priv, kyber_ct)
-        state_json = _rust.ratchet_init_receiver(shared, my_x25519_priv, eph_pub)
+        state_json = _rust.ratchet_init_receiver(shared, my_x25519_priv, ratchet_pub)
         self._sessions[peer_id] = CryptoSession(peer_id, state_json)
 
     def encrypt_for(self, peer_id: str, plaintext: bytes) -> bytes:
@@ -237,15 +260,15 @@ class ContactIndex:
     """Converts .onion addresses into opaque HMAC tokens for DB storage."""
 
     def __init__(self, master_key: bytes):
-        self._key = master_key
+        _require_rust()
+        self._key = bytearray(master_key)
 
     def index(self, onion_address: str) -> str:
-        token = _rust.hmac_sha3_index(self._key, onion_address.encode())
+        token = _rust.hmac_sha3_index(bytes(self._key), onion_address.encode())
         return token.hex()
 
     def close(self) -> None:
-        key_buf = bytearray(self._key)
-        _wipe_bytes(key_buf)
+        _wipe_bytes(self._key)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

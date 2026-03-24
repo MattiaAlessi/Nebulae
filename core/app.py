@@ -116,19 +116,25 @@ class NEBULAEApp:
     # ── Message flow ──────────────────────────────────────────────────────────
 
     def _on_message(self, peer_id: str, body: bytes) -> None:
+        peer_onion = peer_id
+        if self.node:
+            peer = self.node.peers.get(peer_id)
+            if peer and peer.onion_address:
+                peer_onion = peer.onion_address
+
         contacts = self.store.load_contacts() if self.store else []
         nickname = next(
-            (c.get("nickname", peer_id) for c in contacts if c.get("node_id") == peer_id),
+            (c.get("nickname", peer_onion) for c in contacts if c.get("onion") == peer_onion),
             peer_id[:8]
         )
         if self.store:
             import uuid
             self.store.save_message(
-                peer_id, "in", body, str(uuid.uuid4())
+                peer_onion, "in", body, str(uuid.uuid4())
             )
         if self._canary:
             self._canary.heartbeat()
-        self.message_cb(peer_id, nickname, body.decode(errors="replace"))
+        self.message_cb(peer_onion, nickname, body.decode(errors="replace"))
 
     def send_message(
         self,
@@ -139,10 +145,15 @@ class NEBULAEApp:
         if not self.node or not self._running:
             return False
         body = text.encode()
+        contact_id = peer_id
+        if self.node:
+            peer = self.node.peers.get(peer_id)
+            if peer and peer.onion_address:
+                contact_id = peer.onion_address
         if self.store:
             import uuid
             self.store.save_message(
-                peer_id, "out", body, str(uuid.uuid4()),
+                contact_id, "out", body, str(uuid.uuid4()),
                 self_destruct_seconds=self_destruct_seconds,
             )
         if self._canary:
@@ -154,7 +165,17 @@ class NEBULAEApp:
     def connect_peer(self, onion: str) -> bool:
         if not self.node:
             return False
-        return self.node.connect_to_peer(onion)
+        # Professional-grade retry/backoff for transient Tor/bootstrap failures.
+        delays = [0.0, 0.8, 1.6]
+        for i, delay in enumerate(delays, start=1):
+            if delay:
+                time.sleep(delay)
+            if self.node.connect_to_peer(onion):
+                if i > 1:
+                    self.status_cb(f"Connected to {onion} after retry {i}")
+                return True
+        self.status_cb(f"Connect failed: {onion}")
+        return False
 
     def add_contact(self, onion: str, nickname: str) -> None:
         if self.store:

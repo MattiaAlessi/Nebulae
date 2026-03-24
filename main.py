@@ -160,7 +160,7 @@ class NEBULAECLI:
         if not args:
             self._print("[red]Usage: /connect <onion>[/red]"); return
         ok = self.app.connect_peer(args[0])
-        self._print(f"{'[green]✓ Connected' if ok else '[red]✗ Failed'}[/]")
+        self._print("[green]✓ Connected[/green]" if ok else "[red]✗ Failed[/red]")
 
     def _cmd_add(self, args):
         if len(args) < 2:
@@ -213,14 +213,22 @@ class NEBULAECLI:
     def _cmd_history(self, args):
         if not args:
             self._print("[red]Usage: /history <onion> [limit][/red]"); return
-        limit = int(args[1]) if len(args) > 1 else 50
+        try:
+            limit = int(args[1]) if len(args) > 1 else 50
+        except ValueError:
+            self._print("[red]Invalid limit. Use an integer.[/red]")
+            return
         history = self.app.get_history(args[0], limit)
         for m in history:
             arrow = "[cyan]→[/cyan]" if m["direction"] == "out" else "[purple]←[/purple]"
             self._print(f"  {arrow} {m['body']}")
 
     def _cmd_canary(self, args):
-        hours = float(args[0]) if args else 48
+        try:
+            hours = float(args[0]) if args else 48
+        except ValueError:
+            self._print("[red]Invalid value. Use hours as number (e.g. 48 or 1.5).[/red]")
+            return
         self.app.enable_canary(hours)
         self._print(f"[yellow]⚠ Canary set: {hours}h timeout[/yellow]")
 

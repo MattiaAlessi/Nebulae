@@ -889,7 +889,7 @@ class NEBULAEWindow(tk.Tk):
                  font=FONT_MONO).pack(fill="x", ipady=5)
 
         tk.Button(body, text="ENABLE CANARY",
-                  command=lambda: self.app.enable_canary(float(canary_var.get()) or 48),
+                  command=lambda: self._enable_canary_from_ui(canary_var.get()),
                   bg=C["accent_amber"], fg=C["bg_deep"],
                   font=(FONT_BODY[0], 10, "bold"), relief="flat",
                   cursor="hand2", pady=8).pack(fill="x", pady=12)
@@ -905,6 +905,16 @@ class NEBULAEWindow(tk.Tk):
                                parent=self, icon="warning"):
             if self.app:
                 self.app.panic_wipe()
+
+    def _enable_canary_from_ui(self, value: str):
+        if not self.app:
+            return
+        try:
+            hours = float(value) if value.strip() else 48.0
+        except ValueError:
+            messagebox.showerror("Invalid value", "Canary timeout must be a number.", parent=self)
+            return
+        self.app.enable_canary(hours)
 
     # ── Panic ─────────────────────────────────────────────────────────────────
 

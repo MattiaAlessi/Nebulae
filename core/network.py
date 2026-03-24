@@ -38,6 +38,63 @@ CHAFF_INTERVAL  = (2.0, 8.0)       # seconds between chaff packets
 # ─────────────────────────────────────────────────────────────────────────────
 #  Wire protocol helpers
 # ─────────────────────────────────────────────────────────────────────────────
+def _announce_core_fields(node_id: str, onion: Optional[str], x25519_pub: str, kyber_pub: str, ed25519_pub: str) -> dict:
+    return {
+        "node_id": node_id,
+        "onion": onion,
+        "x25519_pub": x25519_pub,
+        "kyber_pub": kyber_pub,
+        "ed25519_pub": ed25519_pub,
+    }
+
+
+def _encode_announce_for_signing(data: dict) -> bytes:
+    # Deterministic encoding so both sides verify the same bytes.
+    return json.dumps(data, sort_keys=True, separators=(",", ":")).encode()
+
+
+def _build_signed_announce(identity: dict, node_id: str, onion: Optional[str]) -> bytes:
+    import p2p_crypto as _rust
+
+    core = _announce_core_fields(
+        node_id=node_id,
+        onion=onion,
+        x25519_pub=identity["x25519_public"],
+        kyber_pub=identity["kyber_public"],
+        ed25519_pub=identity["ed25519_public"],
+    )
+    sig = _rust.sign_message(bytes.fromhex(identity["ed25519_private"]), _encode_announce_for_signing(core))
+    payload = dict(core)
+    payload["announce_sig"] = sig.hex()
+    return json.dumps(payload).encode()
+
+
+def _parse_and_verify_announce(payload: bytes) -> dict:
+    import p2p_crypto as _rust
+
+    info = json.loads(payload)
+    required = {"node_id", "onion", "x25519_pub", "kyber_pub", "ed25519_pub", "announce_sig"}
+    missing = [k for k in required if k not in info]
+    if missing:
+        raise ValueError(f"Missing ANNOUNCE fields: {missing}")
+
+    core = _announce_core_fields(
+        node_id=info["node_id"],
+        onion=info["onion"],
+        x25519_pub=info["x25519_pub"],
+        kyber_pub=info["kyber_pub"],
+        ed25519_pub=info["ed25519_pub"],
+    )
+    ok = _rust.verify_signature(
+        bytes.fromhex(info["ed25519_pub"]),
+        _encode_announce_for_signing(core),
+        bytes.fromhex(info["announce_sig"]),
+    )
+    if not ok:
+        raise ValueError("Invalid ANNOUNCE signature")
+    return info
+
+
 def pack_message(msg_type: int, payload: bytes) -> bytes:
     """Frame: [4B len][1B type][payload]"""
     frame = struct.pack(">IB", len(payload) + 1, msg_type) + payload
@@ -190,7 +247,7 @@ class AdaptivePadding:
 @dataclass
 class QueuedMessage:
     peer_onion: str
-    encrypted_payload: bytes
+    payload: bytes
     enqueued_at: float = field(default_factory=time.time)
     max_age: float = 86400.0  # 24h
 
@@ -209,7 +266,7 @@ class OutboxQueue:
         with self._lock:
             msgs = self._queue.pop(peer_onion, [])
             now  = time.time()
-            return [m.encrypted_payload for m in msgs
+            return [m.payload for m in msgs
                     if (now - m.enqueued_at) < m.max_age]
 
     def purge_expired(self) -> None:
@@ -314,10 +371,19 @@ class P2PNode:
 
     def stop(self) -> None:
         self._running = False
+        for peer in list(self.peers.values()):
+            try:
+                if peer.writer:
+                    peer.writer.close()
+            except Exception:
+                pass
+        self.peers.clear()
         if self._loop and not self._loop.is_closed():
             if self._server:
                 self._loop.call_soon_threadsafe(self._server.close)
             self._loop.call_soon_threadsafe(self._loop.stop)
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=2.0)
         if self._tor_ctrl:
             self._tor_ctrl.close()
         self.crypto.close_all()
@@ -325,7 +391,14 @@ class P2PNode:
     def _run_loop(self) -> None:
         self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
-        self._loop.run_until_complete(self._async_main())
+        try:
+            self._loop.run_until_complete(self._async_main())
+        except RuntimeError as e:
+            if "Event loop stopped before Future completed" not in str(e):
+                raise
+        finally:
+            if not self._loop.is_closed():
+                self._loop.close()
 
     async def _async_main(self) -> None:
         self._server = await asyncio.start_server(
@@ -360,7 +433,7 @@ class P2PNode:
                 writer.close()
                 return
 
-            info    = json.loads(payload)
+            info = _parse_and_verify_announce(payload)
             peer_id = info["node_id"]
             onion   = info.get("onion", "unknown.onion")
 
@@ -381,13 +454,7 @@ class P2PNode:
             self.peers[peer_id] = peer
 
             # Reply with our ANNOUNCE so outbound peers can derive handshake keys.
-            my_announce = json.dumps({
-                "node_id": self.node_id,
-                "onion": self.onion_address,
-                "x25519_pub": self.identity["x25519_public"],
-                "kyber_pub": self.identity["kyber_public"],
-                "ed25519_pub": self.identity["ed25519_public"],
-            }).encode()
+            my_announce = _build_signed_announce(self.identity, self.node_id, self.onion_address)
             writer.write(pack_message(MsgType.ANNOUNCE, my_announce))
             await writer.drain()
 
@@ -402,7 +469,8 @@ class P2PNode:
             # Send queued offline messages
             backlog = self._outbox.drain(onion)
             for queued in backlog:
-                writer.write(pack_message(MsgType.MESSAGE, queued))
+                encrypted = self.crypto.encrypt_for(peer_id, queued)
+                writer.write(pack_message(MsgType.MESSAGE, encrypted))
                 await writer.drain()
 
             # Start adaptive padding
@@ -459,13 +527,20 @@ class P2PNode:
             envelope  = json.loads(plaintext)
 
             msg_uuid = envelope.get("uuid")
+            if not isinstance(msg_uuid, str) or not msg_uuid:
+                return
             if msg_uuid in self._seen_uuids:
                 return  # Duplicate / replay prevention
             self._seen_uuids.add(msg_uuid)
             if len(self._seen_uuids) > 10_000:
                 self._seen_uuids = set(list(self._seen_uuids)[-5_000:])
 
-            self.message_cb(peer.node_id, envelope.get("body", b""))
+            body = envelope.get("body", "")
+            if isinstance(body, str):
+                body = body.encode()
+            elif not isinstance(body, (bytes, bytearray)):
+                body = str(body).encode()
+            self.message_cb(peer.node_id, bytes(body))
         except Exception as e:
             logger.error(f"Message handling error: {e}")
 
@@ -483,13 +558,7 @@ class P2PNode:
             reader, writer = await asyncio.open_connection(sock=sock)
 
             # Send ANNOUNCE
-            announce = json.dumps({
-                "node_id":    self.node_id,
-                "onion":      self.onion_address,
-                "x25519_pub": self.identity["x25519_public"],
-                "kyber_pub":  self.identity["kyber_public"],
-                "ed25519_pub": self.identity["ed25519_public"],
-            }).encode()
+            announce = _build_signed_announce(self.identity, self.node_id, self.onion_address)
             writer.write(pack_message(MsgType.ANNOUNCE, announce))
             await writer.drain()
 
@@ -497,7 +566,7 @@ class P2PNode:
             msg_type, payload = await asyncio.wait_for(read_frame(reader), timeout=20)
             if msg_type != MsgType.ANNOUNCE:
                 raise ValueError(f"Expected ANNOUNCE from peer, got {msg_type}")
-            info = json.loads(payload)
+            info = _parse_and_verify_announce(payload)
             peer_node_id = info["node_id"]
             peer_onion = info.get("onion", onion)
             peer_x25519_pub = bytes.fromhex(info["x25519_pub"])
@@ -525,6 +594,13 @@ class P2PNode:
             padding = AdaptivePadding(lambda d: writer.write(d))
             padding.start()
             self._loop.create_task(self._receive_loop(peer, padding))
+
+            # Flush queued messages for this onion now that session exists.
+            backlog = self._outbox.drain(peer_onion)
+            for queued in backlog:
+                encrypted = self.crypto.encrypt_for(peer_node_id, queued)
+                writer.write(pack_message(MsgType.MESSAGE, encrypted))
+            await writer.drain()
             return peer
         except Exception as e:
             logger.error(f"Connect to {onion} failed: {e}")
@@ -532,9 +608,18 @@ class P2PNode:
 
     def connect_to_peer(self, onion: str, port: int = NEBULAE_PORT) -> bool:
         if not self._loop:
+            deadline = time.time() + 5.0
+            while not self._loop and time.time() < deadline:
+                time.sleep(0.05)
+        if not self._loop:
+            logger.error("connect_to_peer called before network loop was ready")
             return False
         future = asyncio.run_coroutine_threadsafe(self._connect_to(onion, port), self._loop)
-        peer = future.result(timeout=45)
+        try:
+            peer = future.result(timeout=45)
+        except Exception as e:
+            logger.error(f"connect_to_peer timeout/error for {onion}: {e}")
+            return False
         if peer:
             self.peers[peer.node_id] = peer
             return True
@@ -549,13 +634,13 @@ class P2PNode:
         if not peer or not peer.session_established:
             # Queue for later delivery
             onion = peer.onion_address if peer else peer_id
-            envelope = json.dumps({"uuid": str(uuid.uuid4()), "body": body.decode()}).encode()
+            envelope = json.dumps({"uuid": str(uuid.uuid4()), "body": body.decode(errors="replace")}).encode()
             self._outbox.enqueue(onion, envelope)
             return False
 
         try:
-            envelope  = json.dumps({"uuid": str(uuid.uuid4()), "body": body.decode()}).encode()
-            encrypted = self.crypto.encrypt_for(peer_id, envelope)
+            envelope  = json.dumps({"uuid": str(uuid.uuid4()), "body": body.decode(errors="replace")}).encode()
+            encrypted = self.crypto.encrypt_for(peer.node_id, envelope)
             frame     = pack_message(MsgType.MESSAGE, encrypted)
             asyncio.run_coroutine_threadsafe(
                 self._write_to(peer.writer, frame), self._loop
