@@ -127,9 +127,10 @@ class NEBULAECLI:
         self._print(HELP)
         while True:
             try:
-                line = input("\n[nebulae]> " if not HAS_RICH else "").strip()
                 if HAS_RICH:
-                    line = Prompt.ask("[cyan]>[/cyan]")
+                    line = Prompt.ask("[cyan]>[/cyan]").strip()
+                else:
+                    line = input("\n[nebulae]> ").strip()
             except (EOFError, KeyboardInterrupt):
                 self._do_exit()
                 break

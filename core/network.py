@@ -51,6 +51,16 @@ def unpack_message(data: bytes) -> Tuple[int, bytes]:
     return msg_type, data[5:5 + length - 1]
 
 
+async def read_frame(reader: asyncio.StreamReader) -> Tuple[int, bytes]:
+    """Read exactly one wire frame from a stream."""
+    header = await reader.readexactly(5)
+    length = struct.unpack(">I", header[:4])[0]
+    if length < 1 or length > MSG_MAX_SIZE:
+        raise ValueError(f"Invalid frame length: {length}")
+    payload = await reader.readexactly(length - 1) if length > 1 else b""
+    return unpack_message(header + payload)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 #  Message types
 # ─────────────────────────────────────────────────────────────────────────────
@@ -344,8 +354,7 @@ class P2PNode:
         peer_id = None
         try:
             # Receive handshake announcement
-            header = await reader.readexactly(5)
-            msg_type, payload = unpack_message(header + await reader.read(65536))
+            msg_type, payload = await read_frame(reader)
             if msg_type != MsgType.ANNOUNCE:
                 logger.warning("Expected ANNOUNCE, got %d", msg_type)
                 writer.close()
@@ -371,9 +380,19 @@ class P2PNode:
             )
             self.peers[peer_id] = peer
 
+            # Reply with our ANNOUNCE so outbound peers can derive handshake keys.
+            my_announce = json.dumps({
+                "node_id": self.node_id,
+                "onion": self.onion_address,
+                "x25519_pub": self.identity["x25519_public"],
+                "kyber_pub": self.identity["kyber_public"],
+                "ed25519_pub": self.identity["ed25519_public"],
+            }).encode()
+            writer.write(pack_message(MsgType.ANNOUNCE, my_announce))
+            await writer.drain()
+
             # Receive handshake blob
-            header2 = await reader.readexactly(5)
-            msg_type2, hs_blob = unpack_message(header2 + await reader.read(65536))
+            msg_type2, hs_blob = await read_frame(reader)
             if msg_type2 == MsgType.HANDSHAKE:
                 my_x25519_priv = bytes.fromhex(self.identity["x25519_private"])
                 my_kyber_priv  = bytes.fromhex(self.identity["kyber_private"])
@@ -404,30 +423,35 @@ class P2PNode:
             writer.close()
 
     async def _receive_loop(self, peer: Peer, padding: AdaptivePadding) -> None:
-        while self._running:
-            try:
-                header = await asyncio.wait_for(peer.reader.readexactly(5), timeout=30)
-                length = struct.unpack(">I", header[:4])[0]
-                rest   = await peer.reader.readexactly(length - 1) if length > 1 else b""
-                msg_type, payload = unpack_message(header + rest)
-
-                if msg_type == MsgType.CHAFF:
-                    continue  # Silently discard chaff
-                elif msg_type == MsgType.PING:
-                    peer.writer.write(pack_message(MsgType.PONG, b""))
-                    await peer.writer.drain()
-                elif msg_type == MsgType.MESSAGE:
-                    await self._handle_message(peer, payload)
-                elif msg_type == MsgType.TYPING_IND:
-                    pass  # forwarded to UI
-                peer.last_seen = time.time()
-            except asyncio.TimeoutError:
-                # Send keepalive ping
+        try:
+            while self._running:
                 try:
-                    peer.writer.write(pack_message(MsgType.PING, b""))
-                    await peer.writer.drain()
-                except Exception:
-                    break
+                    msg_type, payload = await asyncio.wait_for(read_frame(peer.reader), timeout=30)
+
+                    if msg_type == MsgType.CHAFF:
+                        continue  # Silently discard chaff
+                    elif msg_type == MsgType.PING:
+                        peer.writer.write(pack_message(MsgType.PONG, b""))
+                        await peer.writer.drain()
+                    elif msg_type == MsgType.MESSAGE:
+                        await self._handle_message(peer, payload)
+                    elif msg_type == MsgType.TYPING_IND:
+                        pass  # forwarded to UI
+                    peer.last_seen = time.time()
+                except asyncio.TimeoutError:
+                    # Send keepalive ping
+                    try:
+                        peer.writer.write(pack_message(MsgType.PING, b""))
+                        await peer.writer.drain()
+                    except Exception:
+                        break
+        finally:
+            padding.stop()
+            self.peers.pop(peer.node_id, None)
+            try:
+                peer.writer.close()
+            except Exception:
+                pass
 
     async def _handle_message(self, peer: Peer, payload: bytes) -> None:
         try:
@@ -467,18 +491,40 @@ class P2PNode:
                 "ed25519_pub": self.identity["ed25519_public"],
             }).encode()
             writer.write(pack_message(MsgType.ANNOUNCE, announce))
+            await writer.drain()
+
+            # Receive peer ANNOUNCE with real public keys.
+            msg_type, payload = await asyncio.wait_for(read_frame(reader), timeout=20)
+            if msg_type != MsgType.ANNOUNCE:
+                raise ValueError(f"Expected ANNOUNCE from peer, got {msg_type}")
+            info = json.loads(payload)
+            peer_node_id = info["node_id"]
+            peer_onion = info.get("onion", onion)
+            peer_x25519_pub = bytes.fromhex(info["x25519_pub"])
+            peer_kyber_pub = bytes.fromhex(info["kyber_pub"])
+            peer_ed25519_pub = bytes.fromhex(info["ed25519_pub"])
 
             # Send handshake
-            peer_x25519_pub = bytes.fromhex(self.identity["x25519_public"])  # placeholder
-            peer_kyber_pub  = bytes.fromhex(self.identity["kyber_public"])   # placeholder
-            # In real scenario these come from the peer's announce
-            hs_blob = self.crypto.initiate_handshake(onion, peer_x25519_pub, peer_kyber_pub)
+            hs_blob = self.crypto.initiate_handshake(peer_node_id, peer_x25519_pub, peer_kyber_pub)
             writer.write(pack_message(MsgType.HANDSHAKE, hs_blob))
             await writer.drain()
 
-            peer = Peer(onion_address=onion, port=port,
-                        reader=reader, writer=writer,
-                        session_established=True)
+            peer = Peer(
+                onion_address=peer_onion,
+                port=port,
+                node_id=peer_node_id,
+                x25519_pub=peer_x25519_pub,
+                kyber_pub=peer_kyber_pub,
+                ed25519_pub=peer_ed25519_pub,
+                reader=reader,
+                writer=writer,
+                session_established=True,
+            )
+
+            # Start background receive loop for outbound connections too.
+            padding = AdaptivePadding(lambda d: writer.write(d))
+            padding.start()
+            self._loop.create_task(self._receive_loop(peer, padding))
             return peer
         except Exception as e:
             logger.error(f"Connect to {onion} failed: {e}")
@@ -490,7 +536,7 @@ class P2PNode:
         future = asyncio.run_coroutine_threadsafe(self._connect_to(onion, port), self._loop)
         peer = future.result(timeout=45)
         if peer:
-            self.peers[onion] = peer
+            self.peers[peer.node_id] = peer
             return True
         return False
 
@@ -498,6 +544,8 @@ class P2PNode:
 
     def send_message(self, peer_id: str, body: bytes) -> bool:
         peer = self.peers.get(peer_id)
+        if not peer:
+            peer = next((p for p in self.peers.values() if p.onion_address == peer_id), None)
         if not peer or not peer.session_established:
             # Queue for later delivery
             onion = peer.onion_address if peer else peer_id

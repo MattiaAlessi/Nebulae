@@ -26,7 +26,8 @@ except ImportError:
 def _wipe_bytes(data: bytearray) -> None:
     """Overwrite a bytearray with zeros using ctypes for memory certainty."""
     if isinstance(data, bytearray) and len(data) > 0:
-        ctypes.memset(ctypes.c_char_p(bytes(data)), 0, len(data))
+        buf = (ctypes.c_char * len(data)).from_buffer(data)
+        ctypes.memset(ctypes.addressof(buf), 0, len(data))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
